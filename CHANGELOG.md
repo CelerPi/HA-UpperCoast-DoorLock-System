@@ -1,11 +1,19 @@
 # 更新日志
 
-## 0.2.0 - 2026-05-30
+## 0.2.1 - 2026-05-31
 
 - **区分呼叫与监控会话类型**
   - `FrameHub.begin_call()` 新增 `session_type` 参数（`"call"` / `"monitor"`）
   - `snapshot()` 返回 `session_type`，供 Integration 区分呼入与主动监控
   - 主动监控时不再触发呼入弹窗，避免监控画面被呼叫弹窗覆盖
+- **新增实时 WebSocket 通道**
+  - 新增 `/api/ws`，统一推送状态、视频帧和接收音频数据
+  - Dashboard 卡片和手机端可优先使用实时通道，降低轮询延迟
+  - WebSocket 支持 Header Token 和 `?token=` 两种鉴权方式
+- **升级 API 服务实现**
+  - API 服务从 `http.server` 迁移到 `aiohttp`
+  - 保留原有 REST 接口，兼容现有 Integration 和旧版卡片
+  - Dockerfile 新增 `aiohttp` 依赖安装
 
 ## 0.1.9 - 2026-05-30
 - **给每个状态都添加了日志输出**

@@ -17,7 +17,8 @@ LABEL \
 COPY run.sh /
 COPY app /app
 
-RUN chmod a+x /run.sh
+RUN pip install --no-cache-dir aiohttp \
+  && chmod a+x /run.sh
 
 ENV PYTHONPATH=/app \
   PYTHONUNBUFFERED=1

@@ -1,218 +1,297 @@
 from __future__ import annotations
 
+import asyncio
 import base64
-import json
+import contextlib
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+from aiohttp import web
 
 from .config import IntercomConfig
 
 
-def make_api_handler(core: Any, config: IntercomConfig) -> type[BaseHTTPRequestHandler]:
-    class VDSApiHandler(BaseHTTPRequestHandler):
-        server_version = "VDS-API/0.1.0"
+class VDSApi:
+    def __init__(self, core: Any, config: IntercomConfig) -> None:
+        self.core = core
+        self.config = config
 
-        def do_GET(self) -> None:
-            if self.path == "/health":
-                self._write_json(200, {"ok": True})
-                return
-            if self.path == "/api/status":
-                self._write_json(
-                    200,
-                    {
-                        "runtime": core.frame_hub.snapshot(),
-                        "config": config.as_dict(),
-                    },
-                )
-                return
-            if self.path == "/api/frame":
-                frame = core.frame_hub.get_frame()
-                if frame is None:
-                    self._write_json(404, {"ok": False, "error": "no_frame"})
-                    return
-                self.send_response(200)
-                self.send_header("Content-Type", "image/jpeg")
-                self.send_header("Content-Length", str(len(frame)))
-                self.end_headers()
-                self.wfile.write(frame)
-                return
-            if self.path.startswith("/api/audio"):
-                if not self._authorized():
-                    self._write_json(403, {"ok": False, "error": "forbidden"})
-                    return
-                since = 0
-                if "?" in self.path:
-                    query = self.path.split("?", 1)[1]
-                    for param in query.split("&"):
-                        if param.startswith("since="):
-                            try:
-                                since = int(param.split("=", 1)[1])
-                            except (ValueError, IndexError):
-                                pass
-                chunks = core.frame_hub.get_audio_chunks(since)
-                self._write_json(200, {
-                    "ok": True,
-                    "audio_id": core.frame_hub.snapshot().get("audio_id", 0),
-                    "chunks": [
-                        {"id": aid, "pcm": base64.b64encode(pcm).decode("ascii")}
-                        for aid, pcm in chunks
-                    ],
-                })
-                return
-            if self.path.startswith("/api/monitor/"):
-                parts = self.path.split("/")
-                if len(parts) == 4 and parts[3] in ("start", "stop"):
-                    action = parts[3]
-                    body = self._read_json()
-                    target_ip = body.get("target_ip", "").strip()
-                    if not target_ip:
-                        self._write_json(400, {"ok": False, "error": "missing_target_ip"})
-                        return
-                    if action == "start":
-                        accepted = core.request_monitor_start(str(target_ip))
-                    else:
-                        accepted = core.request_monitor_stop(str(target_ip))
-                    if not accepted:
-                        self._write_json(409, {"ok": False, "error": "monitor_request_rejected"})
-                        return
-                    self._write_json(200, {"ok": True, "action": action, "target_ip": target_ip})
-                    return
-            self._write_json(404, {"ok": False, "error": "not_found"})
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/health", self.health)
+        app.router.add_get("/api/status", self.status)
+        app.router.add_get("/api/frame", self.frame)
+        app.router.add_get("/api/audio", self.get_audio)
+        app.router.add_post("/api/audio", self.post_audio)
+        app.router.add_post("/api/unlock", self.control)
+        app.router.add_post("/api/answer", self.control)
+        app.router.add_post("/api/hangup", self.control)
+        app.router.add_post("/api/monitor/start", self.monitor)
+        app.router.add_post("/api/monitor/stop", self.monitor)
+        app.router.add_get("/api/ws", self.websocket)
+        return app
 
-        def do_POST(self) -> None:
-            if self.path in ("/api/unlock", "/api/answer", "/api/hangup"):
-                if not self._authorized():
-                    self._write_json(403, {"ok": False, "error": "forbidden"})
-                    return
+    async def health(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
+        return self._json(200, {"ok": True})
 
-                body = self._read_json()
-                target_ip = body.get("target_ip") or core.frame_hub.snapshot().get("target_ip")
-                if not target_ip:
-                    self._write_json(409, {"ok": False, "error": "no_active_call"})
-                    return
+    async def status(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
+        return self._json(
+            200,
+            {
+                "runtime": self.core.frame_hub.snapshot(),
+                "config": self.config.as_dict(),
+            },
+        )
 
-                if self.path == "/api/unlock":
-                    accepted = core.request_unlock(str(target_ip))
-                    action = "unlock"
-                elif self.path == "/api/answer":
-                    accepted = core.request_answer(str(target_ip))
-                    action = "answer"
-                else:
-                    accepted = core.request_hangup(str(target_ip))
-                    action = "hangup"
+    async def frame(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
 
-                if not accepted:
-                    self._write_json(409, {"ok": False, "error": "request_rejected", "action": action})
-                    return
-                self._write_json(200, {"ok": True, "action": action, "target_ip": target_ip})
-                return
+        frame = self.core.frame_hub.get_frame()
+        if frame is None:
+            return self._json(404, {"ok": False, "error": "no_frame"})
+        return web.Response(body=frame, content_type="image/jpeg")
 
-            if self.path == "/api/audio":
-                if not self._authorized():
-                    self._write_json(403, {"ok": False, "error": "forbidden"})
-                    return
+    async def get_audio(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
 
-                body = self._read_json()
-                target_ip = body.get("target_ip", "").strip()
-                pcm_b64 = body.get("pcm", "")
-                if not target_ip or not pcm_b64:
-                    self._write_json(400, {"ok": False, "error": "missing_target_ip_or_pcm"})
-                    return
+        try:
+            since = int(request.query.get("since", 0))
+        except (TypeError, ValueError):
+            since = 0
 
-                try:
-                    pcm = base64.b64decode(pcm_b64)
-                except Exception:
-                    self._write_json(400, {"ok": False, "error": "invalid_pcm_base64"})
-                    return
+        chunks = self.core.frame_hub.get_audio_chunks(since)
+        return self._json(
+            200,
+            {
+                "ok": True,
+                "audio_id": self.core.frame_hub.snapshot().get("audio_id", 0),
+                "chunks": [
+                    {"id": aid, "pcm": base64.b64encode(pcm).decode("ascii")}
+                    for aid, pcm in chunks
+                ],
+            },
+        )
 
-                if len(pcm) % 2 != 0:
-                    self._write_json(400, {"ok": False, "error": "pcm_length_must_be_even"})
-                    return
+    async def post_audio(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
 
-                accepted = core.request_outgoing_audio(target_ip, pcm)
-                if not accepted:
-                    self._write_json(409, {"ok": False, "error": "audio_request_rejected"})
-                    return
-                self._write_json(200, {"ok": True, "target_ip": target_ip, "samples": len(pcm) // 2})
-                return
+        body = await self._read_json(request)
+        target_ip = str(body.get("target_ip", "")).strip()
+        pcm_b64 = str(body.get("pcm", ""))
+        if not target_ip or not pcm_b64:
+            return self._json(400, {"ok": False, "error": "missing_target_ip_or_pcm"})
 
-            if self.path in ("/api/monitor/start", "/api/monitor/stop"):
-                if not self._authorized():
-                    self._write_json(403, {"ok": False, "error": "forbidden"})
-                    return
+        try:
+            pcm = base64.b64decode(pcm_b64)
+        except Exception:
+            return self._json(400, {"ok": False, "error": "invalid_pcm_base64"})
 
-                body = self._read_json()
-                target_ip = body.get("target_ip", "").strip()
-                if not target_ip:
-                    self._write_json(400, {"ok": False, "error": "missing_target_ip"})
-                    return
+        if len(pcm) % 2 != 0:
+            return self._json(400, {"ok": False, "error": "pcm_length_must_be_even"})
 
-                action = "start" if self.path == "/api/monitor/start" else "stop"
-                if action == "start":
-                    accepted = core.request_monitor_start(str(target_ip))
-                else:
-                    accepted = core.request_monitor_stop(str(target_ip))
+        accepted = self.core.request_outgoing_audio(target_ip, pcm)
+        if not accepted:
+            return self._json(409, {"ok": False, "error": "audio_request_rejected"})
+        return self._json(200, {"ok": True, "target_ip": target_ip, "samples": len(pcm) // 2})
 
-                if not accepted:
-                    self._write_json(409, {"ok": False, "error": "monitor_request_rejected"})
-                    return
-                self._write_json(200, {"ok": True, "action": action, "target_ip": target_ip})
-                return
+    async def control(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
 
-            self._write_json(404, {"ok": False, "error": "not_found"})
+        body = await self._read_json(request)
+        target_ip = body.get("target_ip") or self.core.frame_hub.snapshot().get("target_ip")
+        if not target_ip:
+            return self._json(409, {"ok": False, "error": "no_active_call"})
 
-        def log_message(self, _format: str, *_args: Any) -> None:
-            return
+        path = request.path
+        if path == "/api/unlock":
+            accepted = self.core.request_unlock(str(target_ip))
+            action = "unlock"
+        elif path == "/api/answer":
+            accepted = self.core.request_answer(str(target_ip))
+            action = "answer"
+        else:
+            accepted = self.core.request_hangup(str(target_ip))
+            action = "hangup"
 
-        def _authorized(self) -> bool:
-            if not config.api_token:
-                return False
-            return self.headers.get("Authorization", "") == f"Bearer {config.api_token}"
+        if not accepted:
+            return self._json(409, {"ok": False, "error": "request_rejected", "action": action})
+        return self._json(200, {"ok": True, "action": action, "target_ip": target_ip})
 
-        def _read_json(self) -> dict[str, Any]:
-            content_length = int(self.headers.get("Content-Length") or 0)
-            if content_length <= 0:
-                return {}
+    async def monitor(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return self._json(403, {"ok": False, "error": "forbidden"})
+
+        body = await self._read_json(request)
+        target_ip = str(body.get("target_ip", "")).strip()
+        if not target_ip:
+            return self._json(400, {"ok": False, "error": "missing_target_ip"})
+
+        action = "start" if request.path == "/api/monitor/start" else "stop"
+        if action == "start":
+            accepted = self.core.request_monitor_start(target_ip)
+        else:
+            accepted = self.core.request_monitor_stop(target_ip)
+
+        if not accepted:
+            return self._json(409, {"ok": False, "error": "monitor_request_rejected"})
+        return self._json(200, {"ok": True, "action": action, "target_ip": target_ip})
+
+    async def websocket(self, request: web.Request) -> web.WebSocketResponse:
+        if not self._authorized(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json({"type": "error", "error": "forbidden"})
+            await ws.close()
+            return ws
+
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        receive_task = asyncio.create_task(self._receive_ws(ws))
+        try:
+            last_frame_id = -1
+            last_audio_id = -1
+            last_snapshot: dict[str, Any] | None = None
+            while not ws.closed:
+                snapshot = self.core.frame_hub.snapshot()
+                if snapshot != last_snapshot:
+                    await ws.send_json(
+                        {
+                            "type": "status",
+                            "runtime": snapshot,
+                            "config": self.config.as_dict(),
+                        }
+                    )
+                    last_snapshot = snapshot
+
+                frame_id = int(snapshot.get("frame_id", 0))
+                if frame_id != last_frame_id:
+                    frame = self.core.frame_hub.get_frame()
+                    if frame is not None:
+                        await ws.send_json(
+                            {
+                                "type": "frame",
+                                "frame_id": frame_id,
+                                "jpeg": base64.b64encode(frame).decode("ascii"),
+                            }
+                        )
+                    last_frame_id = frame_id
+
+                chunks = self.core.frame_hub.get_audio_chunks(last_audio_id)
+                if chunks:
+                    for audio_id, pcm in chunks:
+                        await ws.send_json(
+                            {
+                                "type": "audio",
+                                "id": audio_id,
+                                "pcm": base64.b64encode(pcm).decode("ascii"),
+                            }
+                        )
+                        last_audio_id = max(last_audio_id, audio_id)
+
+                await asyncio.sleep(0.05)
+        finally:
+            receive_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await receive_task
+        return ws
+
+    async def _receive_ws(self, ws: web.WebSocketResponse) -> None:
+        async for msg in ws:
+            if msg.type != web.WSMsgType.TEXT:
+                continue
             try:
-                payload = self.rfile.read(content_length)
-                data = json.loads(payload.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return {}
-            return data if isinstance(data, dict) else {}
+                data = msg.json()
+            except ValueError:
+                continue
+            if data.get("type") != "audio":
+                continue
 
-        def _write_json(self, status: int, body: dict[str, Any]) -> None:
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            target_ip = str(data.get("target_ip", "")).strip()
+            pcm_b64 = str(data.get("pcm", ""))
+            if not target_ip or not pcm_b64:
+                continue
+            with contextlib.suppress(Exception):
+                pcm = base64.b64decode(pcm_b64)
+                self.core.request_outgoing_audio(target_ip, pcm)
 
-    return VDSApiHandler
+    def _authorized(self, request: web.Request) -> bool:
+        if not self.config.api_token:
+            return False
+        auth_header = request.headers.get("Authorization", "")
+        token = request.query.get("token", "")
+        return auth_header == f"Bearer {self.config.api_token}" or token == self.config.api_token
+
+    async def _read_json(self, request: web.Request) -> dict[str, Any]:
+        try:
+            data = await request.json()
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _json(self, status: int, body: dict[str, Any]) -> web.Response:
+        return web.json_response(body, status=status)
 
 
 class ApiServer:
     def __init__(self, core: Any, config: IntercomConfig) -> None:
         self.core = core
         self.config = config
-        self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._runner: web.AppRunner | None = None
+        self._started = threading.Event()
 
     def start(self) -> None:
-        if self._server is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
-        handler = make_api_handler(self.core, self.config)
-        self._server = ThreadingHTTPServer((self.config.api_host, self.config.api_port), handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, name="VDS-API", daemon=True)
+        self._started.clear()
+        self._thread = threading.Thread(target=self._run, name="VDS-API", daemon=True)
         self._thread.start()
+        self._started.wait(timeout=5)
 
     def stop(self) -> None:
-        if self._server is None:
+        if self._loop is None:
             return
-        self._server.shutdown()
-        self._server.server_close()
+
+        future = asyncio.run_coroutine_threadsafe(self._cleanup(), self._loop)
+        with contextlib.suppress(Exception):
+            future.result(timeout=3)
+        self._loop.call_soon_threadsafe(self._loop.stop)
+
         if self._thread is not None:
             self._thread.join(timeout=2)
-        self._server = None
         self._thread = None
+        self._loop = None
+        self._runner = None
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._start_async())
+            self._started.set()
+            loop.run_forever()
+        finally:
+            loop.run_until_complete(self._cleanup())
+            loop.close()
+
+    async def _start_async(self) -> None:
+        self._runner = web.AppRunner(VDSApi(self.core, self.config).app())
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self.config.api_host, self.config.api_port)
+        await site.start()
+
+    async def _cleanup(self) -> None:
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None

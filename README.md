@@ -1,6 +1,6 @@
 # 云海湾门禁系统 — Home Assistant App
 
-![version](https://img.shields.io/badge/version-v0.2.0-blue)
+![version](https://img.shields.io/badge/version-v0.2.1-blue)
 ![ha-version](https://img.shields.io/badge/HA-2026.5.0%2B-41BDF5)
 
 麦驰可视对讲门禁系统的 Home Assistant App（原称 Add-on），将实体室内机虚拟化，实现对讲、监控、远程解锁等功能。
@@ -54,6 +54,7 @@ App 启动后会提供以下 HTTP 接口：
 | `/api/audio` | POST | 发送音频 PCM 数据到门口机 |
 | `/api/monitor/start` | POST | 开始主动监控指定门口机 |
 | `/api/monitor/stop` | POST | 停止主动监控 |
+| `/api/ws` | WebSocket | 实时状态、视频帧和音频通道 |
 
 ## 音频格式
 
