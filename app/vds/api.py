@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import threading
+import time
 from typing import Any
 
 from aiohttp import web
@@ -160,9 +161,16 @@ class VDSApi:
             last_frame_id = -1
             last_audio_id = -1
             last_snapshot: dict[str, Any] | None = None
+            next_status_at = 0.0
             while not ws.closed:
                 snapshot = self.core.frame_hub.snapshot()
-                if snapshot != last_snapshot:
+                now = time.monotonic()
+                status_snapshot = {
+                    key: value
+                    for key, value in snapshot.items()
+                    if key not in {"frame_id", "audio_id", "has_frame", "has_audio"}
+                }
+                if status_snapshot != last_snapshot or now >= next_status_at:
                     await ws.send_json(
                         {
                             "type": "status",
@@ -170,7 +178,8 @@ class VDSApi:
                             "config": self.config.as_dict(),
                         }
                     )
-                    last_snapshot = snapshot
+                    last_snapshot = status_snapshot
+                    next_status_at = now + 1.0
 
                 frame_id = int(snapshot.get("frame_id", 0))
                 if frame_id != last_frame_id:
@@ -197,7 +206,7 @@ class VDSApi:
                         )
                         last_audio_id = max(last_audio_id, audio_id)
 
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.02)
         finally:
             receive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
