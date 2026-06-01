@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.2.4 - 2026-06-01
+
+- **修复 WebSocket 客户端断开时 addon 报错**
+  - 前端页面刷新、关闭或移动端切后台时，不再向已关闭 WebSocket 写入数据
+  - 接收循环遇到正常断开时安静退出，避免 `Cannot write to closing transport`
+
 ## 0.2.3 - 2026-06-01
 
 - **WebSocket 媒体流改为二进制传输**

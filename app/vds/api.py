@@ -171,13 +171,15 @@ class VDSApi:
                     if key not in {"frame_id", "audio_id", "has_frame", "has_audio"}
                 }
                 if status_snapshot != last_snapshot or now >= next_status_at:
-                    await ws.send_json(
+                    if not await self._safe_send_json(
+                        ws,
                         {
                             "type": "status",
                             "runtime": snapshot,
                             "config": self.config.as_dict(),
-                        }
-                    )
+                        },
+                    ):
+                        break
                     last_snapshot = status_snapshot
                     next_status_at = now + 1.0
 
@@ -185,40 +187,65 @@ class VDSApi:
                 if frame_id != last_frame_id:
                     frame = self.core.frame_hub.get_frame()
                     if frame is not None:
-                        await ws.send_bytes(b"VDSF" + frame_id.to_bytes(4, "big") + frame)
+                        if not await self._safe_send_bytes(ws, b"VDSF" + frame_id.to_bytes(4, "big") + frame):
+                            break
                     last_frame_id = frame_id
 
                 chunks = self.core.frame_hub.get_audio_chunks(last_audio_id)
                 if chunks:
                     for audio_id, pcm in chunks:
-                        await ws.send_bytes(b"VDSA" + audio_id.to_bytes(4, "big") + pcm)
+                        if not await self._safe_send_bytes(ws, b"VDSA" + audio_id.to_bytes(4, "big") + pcm):
+                            return ws
                         last_audio_id = max(last_audio_id, audio_id)
 
                 await asyncio.sleep(0.02)
         finally:
             receive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, ConnectionResetError, aiohttp.ClientConnectionError, RuntimeError):
                 await receive_task
         return ws
 
     async def _receive_ws(self, ws: web.WebSocketResponse) -> None:
-        async for msg in ws:
-            if msg.type != web.WSMsgType.TEXT:
-                continue
-            try:
-                data = msg.json()
-            except ValueError:
-                continue
-            if data.get("type") != "audio":
-                continue
+        try:
+            async for msg in ws:
+                if msg.type != web.WSMsgType.TEXT:
+                    continue
+                try:
+                    data = msg.json()
+                except ValueError:
+                    continue
+                if data.get("type") != "audio":
+                    continue
 
-            target_ip = str(data.get("target_ip", "")).strip()
-            pcm_b64 = str(data.get("pcm", ""))
-            if not target_ip or not pcm_b64:
-                continue
-            with contextlib.suppress(Exception):
-                pcm = base64.b64decode(pcm_b64)
-                self.core.request_outgoing_audio(target_ip, pcm)
+                target_ip = str(data.get("target_ip", "")).strip()
+                pcm_b64 = str(data.get("pcm", ""))
+                if not target_ip or not pcm_b64:
+                    continue
+                with contextlib.suppress(Exception):
+                    pcm = base64.b64decode(pcm_b64)
+                    self.core.request_outgoing_audio(target_ip, pcm)
+        except (ConnectionResetError, aiohttp.ClientConnectionError, RuntimeError) as exc:
+            print(f"[api] WebSocket receive stopped: {exc}", flush=True)
+
+    async def _safe_send_json(self, ws: web.WebSocketResponse, data: dict[str, Any]) -> bool:
+        if ws.closed:
+            return False
+        try:
+            await ws.send_json(data)
+            return True
+        except (ConnectionResetError, aiohttp.ClientConnectionError, RuntimeError) as exc:
+            print(f"[api] WebSocket send_json stopped: {exc}", flush=True)
+            return False
+
+    async def _safe_send_bytes(self, ws: web.WebSocketResponse, data: bytes) -> bool:
+        if ws.closed:
+            return False
+        try:
+            await ws.send_bytes(data)
+            return True
+        except (ConnectionResetError, aiohttp.ClientConnectionError, RuntimeError) as exc:
+            print(f"[api] WebSocket send_bytes stopped: {exc}", flush=True)
+            return False
 
     def _authorized(self, request: web.Request) -> bool:
         if not self.config.api_token:
