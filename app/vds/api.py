@@ -185,25 +185,13 @@ class VDSApi:
                 if frame_id != last_frame_id:
                     frame = self.core.frame_hub.get_frame()
                     if frame is not None:
-                        await ws.send_json(
-                            {
-                                "type": "frame",
-                                "frame_id": frame_id,
-                                "jpeg": base64.b64encode(frame).decode("ascii"),
-                            }
-                        )
+                        await ws.send_bytes(b"VDSF" + frame_id.to_bytes(4, "big") + frame)
                     last_frame_id = frame_id
 
                 chunks = self.core.frame_hub.get_audio_chunks(last_audio_id)
                 if chunks:
                     for audio_id, pcm in chunks:
-                        await ws.send_json(
-                            {
-                                "type": "audio",
-                                "id": audio_id,
-                                "pcm": base64.b64encode(pcm).decode("ascii"),
-                            }
-                        )
+                        await ws.send_bytes(b"VDSA" + audio_id.to_bytes(4, "big") + pcm)
                         last_audio_id = max(last_audio_id, audio_id)
 
                 await asyncio.sleep(0.02)

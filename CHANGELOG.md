@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.2.3 - 2026-06-01
+
+- **WebSocket 媒体流改为二进制传输**
+  - 视频帧直接发送 `VDSF + frame_id + JPEG bytes`
+  - 音频帧直接发送 `VDSA + audio_id + PCM bytes`
+  - 移除实时媒体流中的 JSON/base64 编码开销，降低前端解码压力
+
 ## 0.2.2 - 2026-06-01
 
 - **优化实时 WebSocket 媒体推送**
