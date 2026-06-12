@@ -1,6 +1,6 @@
 # 云海湾门禁系统 — Home Assistant App
 
-![version](https://img.shields.io/badge/version-v0.2.4-blue)
+![version](https://img.shields.io/badge/version-v0.2.5-blue)
 ![ha-version](https://img.shields.io/badge/HA-2026.5.0%2B-41BDF5)
 
 麦驰可视对讲门禁系统的 Home Assistant App（原称 Add-on），将实体室内机虚拟化，实现对讲、监控、远程解锁等功能。
@@ -17,7 +17,7 @@
 
 1. 在 Home Assistant 中，进入 **设置 → 应用 → 应用商店**
 2. 点击右上角菜单 → **仓库**
-3. 添加仓库地址：`https://github.com/CelerPi/HA_Virtual_Doorlock_System_App`
+3. 添加仓库地址：`https://github.com/CelerPi/HA-Virtual-Doorlock-System-App`
 4. 商店刷新后，找到 **Virtual Doorlock System (VDS)** 并安装
 
 ## 配置

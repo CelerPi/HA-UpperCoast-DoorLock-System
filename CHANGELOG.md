@@ -1,5 +1,10 @@
 # 更新日志
 
+## 0.2.5 - 2026-06-13
+
+- 统一仓库命名为 `HA-Virtual-Doorlock-System-App`。
+- 同步 README、配置元数据和仓库地址中的 GitHub 链接。
+
 ## 0.2.4 - 2026-06-01
 
 - **修复 WebSocket 客户端断开时 addon 报错**
@@ -96,7 +101,7 @@
 ## 0.1.0 - 2026-05-27
 
 - 初始发布：Home Assistant App 版本
-- 仓库地址：https://github.com/CelerPi/HA_Virtual_Doorlock_System_App
+- 仓库地址：https://github.com/CelerPi/HA-Virtual-Doorlock-System-App
 - 将应用目录、应用标识和 Python 包名统一为 `vds`
 - 加载项名称：Virtual Doorlock System (VDS)
 - 当前仅支持麦驰可视对讲门禁系统
